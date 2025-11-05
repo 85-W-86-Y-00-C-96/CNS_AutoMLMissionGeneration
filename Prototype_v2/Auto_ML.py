@@ -1,5 +1,3 @@
-# 文件名: Auto_ML.py
-# (此为完整文件，支持从urls.txt批量处理，并生成全英文JSON)
 
 import os
 import re
@@ -21,7 +19,6 @@ from tqdm import tqdm
 
 
 class DeepSeekLLMProvider:
-    # ★ MODIFIED: __init__ 方法现在接收一个 api_key 参数
     def __init__(self, api_key: str, model="deepseek-chat"):
         if not api_key:
             raise ValueError("Error: API key was not provided.")
@@ -311,7 +308,6 @@ def process_single_paper(url: str, output_base_dir: str, llm_provider: DeepSeekL
 
 
 if __name__ == "__main__":
-    # 定义输入文件和主输出目录
     DEEPSEEK_API_KEY = "sk-353a88a777bd4c598f17b2923677e100"
     if not DEEPSEEK_API_KEY:
         print("Error: Please set your DEEPSEEK_API_KEY in the script.")
@@ -360,3 +356,4 @@ if __name__ == "__main__":
     print(f"  - Failed:  {failure_count}")
     print(f"Results are saved in the '{MAIN_OUTPUT_DIR}' directory.")
     print("=" * 80)
+
