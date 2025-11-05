@@ -1,7 +1,12 @@
 # 文件名: Auto_ML.py
+# (此为完整文件，支持从urls.txt批量处理，并生成全英文JSON)
+
 import os
 import re
 import json
+import time
+import random
+
 import git
 import requests
 import zipfile
@@ -15,28 +20,27 @@ from deepseek_ai import DeepSeekAI
 from tqdm import tqdm
 
 
-#  LLM Provider
 class DeepSeekLLMProvider:
-    def __init__(self, model="deepseek-chat"):
-        api_key = os.environ.get("DEEPSEEK_API_KEY")
-        if not api_key: raise ValueError("错误：请先设置 DEEPSEEK_API_KEY 环境变量。")
+    # ★ MODIFIED: __init__ 方法现在接收一个 api_key 参数
+    def __init__(self, api_key: str, model="deepseek-chat"):
+        if not api_key:
+            raise ValueError("Error: API key was not provided.")
         self.client = DeepSeekAI(api_key=api_key)
         self.model = model
-        print(f"DeepSeekLLMProvider 初始化成功！模型: {self.model}")
+        print(f"DeepSeekLLMProvider initialized successfully! Model: {self.model}")
 
     def query(self, system_prompt: str, user_context: str) -> str:
-        print(f"\n--- 正在向 DeepSeek API (模型: {self.model}) 发送请求... ---")
+        print(f"\n--- Sending request to DeepSeek API (model: {self.model})... ---")
         try:
             messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_context}]
             response = self.client.chat.completions.create(model=self.model, messages=messages,
                                                            response_format={"type": "json_object"})
             result = response.choices[0].message.content
-            print("--- 成功接收到 API 响应 ---")
+            print("--- API response received successfully. ---")
             return result
         except Exception as e:
-            print(f"!!! 调用 DeepSeek API 时出错: {e} !!!")
+            print(f"!!! Error calling DeepSeek API: {e} !!!")
             return f'{{"error": "API call failed: {e}"}}'
-
 
 
 def _extract_json_from_response(raw_text: str) -> str:
@@ -47,16 +51,15 @@ def _extract_json_from_response(raw_text: str) -> str:
     return raw_text
 
 
-# 信息提取
 def extract_key_sections_from_html(url: str) -> dict:
-    print(f"--- 正在从URL提取信息: {url} ---")
+    print(f"--- Extracting information from URL: {url} ---")
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=45);
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'lxml')
-        title = soup.find('h1').get_text(strip=True) if soup.find('h1') else "No title found"
+        title = soup.find('h1').get_text(strip=True) if soup.find('h1') else "Untitled Paper"
         abstract_tag = soup.find('section', attrs={'aria-labelledby': re.compile(r'Abs', re.I)})
         abstract = abstract_tag.get_text(strip=True, separator='\n') if abstract_tag else "No abstract found"
 
@@ -80,41 +83,46 @@ def extract_key_sections_from_html(url: str) -> dict:
         for a_tag in soup.find_all('a', href=True):
             href = a_tag['href']
             if re.match(repo_pattern, href): links.add(href)
-        print("--- 网页信息提取完成 ---")
+        print("--- Web information extraction complete. ---")
         return {"title": title, "url": url, "abstract": abstract, "methods": methods_text, "results": results_text,
                 "captions": "\n".join(captions), "availability_links": sorted(list(links))}
     except requests.exceptions.RequestException as e:
-        print(f"请求网页时出错: {e}");
+        print(f"Request failed: {e}");
         return None
 
 
-# LLM 驱动的详细任务解析
 def generate_task_with_llm(paper_data: dict, llm_provider: DeepSeekLLMProvider) -> dict:
     system_prompt = """
-    你是一位顶尖的机器学习科学家和软件工程师。你的任务是深入阅读科学论文的摘要、方法和结果，然后提取并生成一个详细的、结构化的JSON对象，用于自动化地创建机器学习基准项目。
+    You are a top-tier interdisciplinary scientist, skilled in both machine learning and specific scientific domains. Your task is to deeply analyze a scientific paper and output two core components in a highly structured JSON format: 1. Details for a reproducible machine learning task. 2. A summary of the paper's scientific contributions.
 
-    你的回复必须且只能是一个格式正确的JSON对象，不包含任何Markdown标记或额外文本。
-    JSON的结构必须如下：
+    Your response MUST be a single, well-formed JSON object, without any Markdown formatting or explanatory text.
+    The JSON structure MUST be as follows:
     {
+      "scientific_summary": {
+        "background": "A 2-3 sentence summary of the research field's background and existing challenges.",
+        "hypothesis_or_goal": "A clear statement of the paper's core research goal, scientific hypothesis, or the key problem it aims to solve.",
+        "methodology_summary": "A bulleted list (as a single string separated by '\\n-') summarizing the key methods, techniques, or experimental designs used to achieve the goal.",
+        "key_results": "A bulleted list (as a single string separated by '\\n-') summarizing the most important scientific findings or conclusions of the paper."
+      },
       "ml_task": {
-        "task_type": "机器学习任务类型，例如：Image Classification, Time Series Forecasting, Text Generation, Object Detection。",
-        "problem_statement": "用一句话简洁地描述核心问题。",
-        "input_description": "描述模型需要接收的输入数据是什么，包括格式、维度等关键信息。",
-        "output_description": "描述模型需要预测的输出是什么，包括格式、含义等。"
+        "task_type": "The type of machine learning task, e.g., 'Image Classification', 'Time Series Forecasting'.",
+        "problem_statement": "A concise, one-sentence description of the core problem.",
+        "input_description": "Description of the model's input data, including format, dimensions, etc.",
+        "output_description": "Description of the model's predicted output, including format, meaning, etc."
       },
       "evaluation_criteria": {
-        "primary_metric": "论文中用于衡量模型性能最主要的指标，例如：Accuracy, F1-Score, Mean Absolute Error, BLEU Score。",
-        "secondary_metrics": "一个包含论文中提到的其他次要评估指标的字符串列表。",
-        "reported_performance": "引用论文中关于模型在主要指标上达到的关键性能结果的一句话描述。如果找不到，请填写 'Not specified'。"
+        "primary_metric": "The main metric used to evaluate model performance, e.g., 'Accuracy', 'F1-Score'.",
+        "secondary_metrics": "A list of other evaluation metrics mentioned.",
+        "reported_performance": "A quote of the key performance result reported in the paper."
       },
       "data_details": {
-        "format": "数据的核心格式，例如：'CSV', 'Image files (JPEG/PNG)', 'Text files (.txt)', 'JSONL', 'HDF5'。",
-        "structure_description": "描述数据是如何组织的。例如：'一个名为data.csv的单一CSV文件'，或者 '图像存储在以类别命名的子文件夹中'，或者 '训练数据位于train.txt，标签位于labels.txt'。",
-        "target_column_or_logic": "如果数据是表格，请指明目标列的名称。如果是其他格式，请描述如何确定标签。例如：'label'，或者 '文件名本身就是标签'，或者 '子文件夹的名称是标签'。如果无法确定，请填写 'Undetermined'。"
+        "format": "The core format of the data, e.g., 'CSV', 'Image files (JPEG/PNG)', 'NetCDF'.",
+        "structure_description": "How the data is organized, e.g., 'A single CSV file named data.csv'.",
+        "target_column_or_logic": "The name of the target column or a description of how to determine labels."
       },
       "model_details": {
-        "architecture_family": "论文中使用的模型架构属于哪个家族？例如：'Convolutional Neural Network (CNN)', 'Transformer', 'Gradient Boosting Tree', 'Recurrent Neural Network (RNN)'。如果不清楚，请填写 'General Deep Learning Model'。",
-        "key_libraries_mentioned": "一个字符串列表，包含论文中明确提到或强烈暗示使用的关键Python库。例如：['PyTorch', 'TensorFlow', 'scikit-learn', 'Hugging Face Transformers', 'Pandas']。如果未提及，返回空列表 []。"
+        "architecture_family": "The family of the model architecture, e.g., 'Convolutional Neural Network (CNN)'.",
+        "key_libraries_mentioned": "A list of key Python libraries mentioned or strongly implied."
       }
     }
     """
@@ -131,52 +139,70 @@ def generate_task_with_llm(paper_data: dict, llm_provider: DeepSeekLLMProvider) 
         detailed_task_data = json.loads(response_clean)
         return detailed_task_data
     except json.JSONDecodeError as e:
-        print(f"!!! 解析详细任务定义JSON时出错: {e}。原始响应: '{response_raw}' !!!")
+        print(f"!!! Error parsing detailed task definition JSON: {e}. Raw response: '{response_raw}' !!!")
         return {"error": f"Failed to parse LLM response. Raw response: {response_raw}"}
 
 
-# 自动化数据处理与分析
 def _handle_zenodo_link(link: str, download_dir: str) -> list:
     log_messages = []
     try:
         record_id_match = re.search(r'(\d+)$', link)
-        if not record_id_match: raise ValueError("无法从链接中提取有效的Zenodo记录ID。")
+        if not record_id_match: raise ValueError("Could not extract a valid Zenodo record ID.")
         record_id = record_id_match.group(1)
-        print(f"  > 检测到Zenodo链接，提取到记录ID: {record_id}")
+        print(f"  > Detected Zenodo link, Record ID: {record_id}")
         api_url = f"https://zenodo.org/api/records/{record_id}"
         response = requests.get(api_url);
         response.raise_for_status()
         data = response.json()
         files_to_download = data.get('files', [])
         if not files_to_download:
-            message = f"  > Zenodo记录 {record_id} 中未找到文件。";
+            message = f"  > No files found in Zenodo record {record_id}.";
             print(message);
             log_messages.append(message);
             return log_messages
-        print(f"  > 找到 {len(files_to_download)} 个文件，开始下载... (可按 Ctrl+C 中断)")
+        print(f"  > Found {len(files_to_download)} files. Starting download... (Press Ctrl+C to interrupt)")
         for file_info in files_to_download:
-            local_filepath = os.path.join(download_dir, file_info['key'])
+            original_filename = file_info['key']
+            sanitized_filename = original_filename.replace('/', '_').replace('\\', '_')
+            if original_filename != sanitized_filename:
+                print(f"    L Sanitizing filename: '{original_filename}' -> '{sanitized_filename}'")
+
+            local_filepath = os.path.join(download_dir, sanitized_filename)
             try:
                 with requests.get(file_info['links']['self'], stream=True) as r:
                     r.raise_for_status()
-                    with open(local_filepath, 'wb') as f, tqdm(
-                            desc=f"    L 下载 {file_info['key']}", total=file_info['size'], unit='B', unit_scale=True,
-                            unit_divisor=1024
-                    ) as bar:
+                    with open(local_filepath, 'wb') as f, tqdm(desc=f"    L Downloading {file_info['key']}",
+                                                               total=file_info['size'], unit='B', unit_scale=True,
+                                                               unit_divisor=1024) as bar:
                         for chunk in r.iter_content(chunk_size=8192): f.write(chunk); bar.update(len(chunk))
                 log_messages.append(f"Successfully downloaded: {local_filepath}")
                 if file_info['key'].endswith('.zip'):
-                    print(f"    L 检测到ZIP文件，正在解压: {file_info['key']}")
-                    with zipfile.ZipFile(local_filepath, 'r') as zip_ref: zip_ref.extractall(download_dir)
-                    log_messages.append(f"Automatically extracted ZIP: {local_filepath}")
+                    print(f"    L Detected ZIP file, extracting: {file_info['key']}")
+                    zip_filename_no_ext = os.path.splitext(file_info['key'])[0]
+                    extract_path = os.path.join(download_dir, zip_filename_no_ext)
+                    os.makedirs(extract_path, exist_ok=True)
+                    with zipfile.ZipFile(local_filepath, 'r') as zip_ref:
+                        zip_ref.extractall(extract_path)
+                    success_message = f"Successfully extracted ZIP to: {extract_path}"
+                    print(f"    L {success_message}")
+                    log_messages.append(success_message)
+                    try:
+                        os.remove(local_filepath)
+                        delete_message = f"Original ZIP file deleted: {local_filepath}"
+                        print(f"    L Original ZIP file deleted: {file_info['key']}")
+                        log_messages.append(delete_message)
+                    except OSError as e:
+                        error_message = f"Could not delete ZIP file {local_filepath}: {e}";
+                        print(f"    L !!! {error_message} !!!");
+                        log_messages.append(error_message)
             except KeyboardInterrupt:
-                print(f"\n中断了 {file_info['key']} 的下载")
+                print(f"\n!!! User interrupted download of {file_info['key']}. !!!")
                 if os.path.exists(local_filepath): os.remove(local_filepath); print(
-                    f"  > 已删除不完整的文件: {local_filepath}")
+                    f"  > Incomplete file deleted: {local_filepath}")
                 raise
     except Exception as e:
         if not isinstance(e, KeyboardInterrupt):
-            error_message = f"处理Zenodo链接 {link} 时失败: {e}";
+            error_message = f"Failed to process Zenodo link {link}: {e}";
             print(f"!!! {error_message} !!!");
             log_messages.append(error_message)
         raise
@@ -184,7 +210,7 @@ def _handle_zenodo_link(link: str, download_dir: str) -> list:
 
 
 def _profile_data_directory(directory: str) -> dict:
-    print(f"  > 正在分析目录中的数据: {directory}")
+    print(f"  > Profiling data in directory: {directory}")
     profile = {'file_formats': {}, 'primary_format': 'unknown', 'file_count': 0}
     DATA_EXTENSIONS = ['.csv', '.nc', '.h5', '.hdf5', '.jsonl', '.json', '.parquet', '.tsv', '.dat', '.grib', '.grib2']
     all_files = glob.glob(os.path.join(directory, '**', '*'), recursive=True)
@@ -192,28 +218,26 @@ def _profile_data_directory(directory: str) -> dict:
         if os.path.isfile(file_path):
             profile['file_count'] += 1
             file_ext = os.path.splitext(file_path)[1].lower()
-            if file_ext:
-                profile['file_formats'][file_ext] = profile['file_formats'].get(file_ext, 0) + 1
+            if file_ext: profile['file_formats'][file_ext] = profile['file_formats'].get(file_ext, 0) + 1
     data_format_counts = {ext: count for ext, count in profile['file_formats'].items() if ext in DATA_EXTENSIONS}
-    if data_format_counts:
-        profile['primary_format'] = max(data_format_counts, key=data_format_counts.get)
-    print(f"  > 分析完成: 共 {profile['file_count']} 个文件, 主要数据格式为 '{profile['primary_format']}'")
+    if data_format_counts: profile['primary_format'] = max(data_format_counts, key=data_format_counts.get)
+    print(
+        f"  > Profiling complete: {profile['file_count']} total files, primary data format is '{profile['primary_format']}'")
     return profile
 
 
-def setup_data_source(links: list, download_dir="data"):
-    print(f"--- 正在处理数据源链接，目标文件夹: {download_dir} ---")
+def setup_data_source(links: list, download_dir: str):
+    print(f"--- Processing data sources, target directory: {download_dir} ---")
     if not links: return ["No data links provided."], {}
     os.makedirs(download_dir, exist_ok=True)
     local_setup_log = []
-
     try:
         for link in links:
             if "github.com" in link:
                 repo_name = urlparse(link).path.split('/')[-1].replace('.git', '')
                 repo_path = os.path.join(download_dir, repo_name)
                 if not os.path.exists(repo_path):
-                    print(f"正在克隆GitHub仓库: {link} -> {repo_path}")
+                    print(f"Cloning GitHub repository: {link} -> {repo_path} (Press Ctrl+C to interrupt)")
                     try:
                         git.Repo.clone_from(link, repo_path)
                         local_setup_log.append(f"Successfully cloned to {repo_path}")
@@ -223,74 +247,116 @@ def setup_data_source(links: list, download_dir="data"):
                         else:
                             raise e
                 else:
-                    print(f"仓库已存在于: {repo_path}")
+                    print(f"Repository already exists at: {repo_path}")
                     local_setup_log.append(f"Repository already exists at {repo_path}")
             elif "zenodo" in link:
                 zenodo_logs = _handle_zenodo_link(link, download_dir)
                 local_setup_log.extend(zenodo_logs)
             else:
-                message = f"无法自动处理的链接 (请手动操作): {link}";
+                message = f"Link cannot be processed automatically (manual handling required): {link}";
                 print(message);
                 local_setup_log.append(message)
     except KeyboardInterrupt:
-        print("数据下载/克隆过程已被手动终止。")
+        print("\n========================================================")
+        print(" Data download/clone process terminated by user.")
+        print("========================================================")
         sys.exit(0)
     except Exception as e:
-        error_message = f"处理链接时发生未知错误: {e}";
+        error_message = f"An unknown error occurred while processing links: {e}";
         print(f"!!! {error_message} !!!");
         local_setup_log.append(error_message)
-
-    # 在所有下载完成后，对整个数据目录进行一次总分析
     final_profile = _profile_data_directory(download_dir)
     return local_setup_log, final_profile
 
 
-def main(url: str):
-    try:
-        llm_provider = DeepSeekLLMProvider(model="deepseek-chat")
-    except ValueError as e:
-        print(e);
-        return
+
+
+def process_single_paper(url: str, output_base_dir: str, llm_provider: DeepSeekLLMProvider):
+
+    print(f"\n{'=' * 80}\nProcessing paper: {url}\n{'=' * 80}")
+
     paper_data = extract_key_sections_from_html(url)
     if not paper_data:
-        print("无法从URL提取有效信息，流程终止。");
-        return
+        raise Exception("Failed to extract web data from URL.")
+
+    sanitized_title = re.sub(r'[\s:/\\]+', '_', paper_data['title'].lower())[:80]
+    paper_output_dir = os.path.join(output_base_dir, f"paper_{sanitized_title}")
+    os.makedirs(paper_output_dir, exist_ok=True)
+    print(f"--- Output directory for this paper: {paper_output_dir} ---")
+
     detailed_task_definition = generate_task_with_llm(paper_data, llm_provider)
     if "error" in detailed_task_definition:
-        print("!!! LLM未能成功生成任务定义，流程终止。 !!!");
-        print(f"错误详情: {detailed_task_definition['error']}");
-        return
+        raise Exception(f"LLM failed to generate task definition. Details: {detailed_task_definition['error']}")
 
-    setup_logs, data_profile = setup_data_source(paper_data['availability_links'])
+    paper_data_dir = os.path.join(paper_output_dir, "data")
+    setup_logs, data_profile = setup_data_source(paper_data['availability_links'], paper_data_dir)
 
-    print("\n" + "=" * 50)
-    print("---            整合最终任务定义            ---")
-    print("=" * 50)
 
     final_task_output = {
-        "source_paper": {
-            "title": paper_data.get('title', 'N/A'),
-            "url": paper_data.get('url', 'N/A')
-        },
+        "source_paper": {"title": paper_data.get('title', 'N/A'), "url": paper_data.get('url', 'N/A')},
         **detailed_task_definition,
         "data_profile": data_profile,
         "data_sources": {
-            "raw_data_path": "data",
+            "raw_data_path": paper_data_dir,  # ★ 使用绝对或相对清晰的路径
             "original_links": paper_data.get('availability_links', []),
             "local_setup_log": setup_logs
         }
     }
-
-    final_json_output = json.dumps(final_task_output, indent=2, ensure_ascii=False)
-    print(final_json_output)
-    output_filename = "generated_mle_task.json"
+    output_filename = os.path.join(paper_output_dir, "generated_mle_task.json")
     with open(output_filename, "w", encoding='utf-8') as f:
-        f.write(final_json_output)
-    print(f"\n详细任务定义(含数据画像)已成功保存到: {output_filename}")
+        f.write(json.dumps(final_task_output, indent=2, ensure_ascii=False))
+
+    print(f"\n✅ Detailed task definition saved to: {output_filename}")
+    print(f"Next step: Run 'python benchmark_generator_v2.py \"{output_filename}\"' to generate the project.")
 
 
-# 启动入口
 if __name__ == "__main__":
-    os.environ["DEEPSEEK_API_KEY"] = "sk-353a88a777bd4c598f17b2923677e100"
-    paper_url = "https://www.nature.com/articles/s41467-025-61087-4"
-    main(paper_url)
+    # 定义输入文件和主输出目录
+    DEEPSEEK_API_KEY = "sk-353a88a777bd4c598f17b2923677e100"
+    if not DEEPSEEK_API_KEY:
+        print("Error: Please set your DEEPSEEK_API_KEY in the script.")
+        sys.exit(1)
+    URL_FILE = "urls.txt"
+    MAIN_OUTPUT_DIR = "batch_output"
+
+
+    if not os.path.exists(URL_FILE):
+        print(f"Error: Input file '{URL_FILE}' not found.")
+        print("Please create a file named 'urls.txt' and add one paper URL per line.")
+        sys.exit(1)
+
+    with open(URL_FILE, 'r', encoding='utf-8') as f:
+        urls = [line.strip() for line in f if line.strip()]
+
+    if not urls:
+        print(f"Error: No URLs found in '{URL_FILE}'.")
+        sys.exit(1)
+
+    os.makedirs(MAIN_OUTPUT_DIR, exist_ok=True)
+
+    try:
+        llm_provider = DeepSeekLLMProvider(api_key=DEEPSEEK_API_KEY, model="deepseek-chat")
+    except ValueError as e:
+        print(e);
+        sys.exit(1)
+
+    success_count = 0
+    failure_count = 0
+
+    print(f"\nFound {len(urls)} papers to process. Starting batch job...")
+
+    for i, url in enumerate(urls):
+        try:
+            process_single_paper(url, MAIN_OUTPUT_DIR, llm_provider)
+            success_count += 1
+        except Exception as e:
+            print(f"\n{'!' * 80}\nFAILED to process paper: {url}\nReason: {e}\n{'!' * 80}")
+            failure_count += 1
+        time.sleep(random.uniform(2, 5))
+
+    print("\n" + "=" * 80)
+    print("Batch processing complete.")
+    print(f"  - Success: {success_count}")
+    print(f"  - Failed:  {failure_count}")
+    print(f"Results are saved in the '{MAIN_OUTPUT_DIR}' directory.")
+    print("=" * 80)
