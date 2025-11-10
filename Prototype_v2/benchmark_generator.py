@@ -353,16 +353,8 @@ def main(json_file_path: str):
     shutil.copy(json_file_path, os.path.join(benchmark_path, 'source_task_definition.json'))
 
     print("\n" + "=" * 50)
-    print("✅ Dynamically generated benchmark project created successfully!")
-    print(f"Project Path: {benchmark_path}")
-    print("\nNext Steps:")
-    print(f"1. `cd {benchmark_path}`")
-    print("2. Carefully read `description.txt` to understand the task.")
-    print("3. Check and install dependencies: `pip install -r requirements.txt`.")
-    print("4. Review the AI-generated `train.py` and `score.py`, especially the # TODO: comments.")
-    print("5. Run `python train.py` to train the model.")
-    print("6. Run `python score.py` to evaluate the model.")
-    print("=" * 50)
+    print("Dynamically generated benchmark project created successfully!")
+
 
 
 if __name__ == "__main__":
